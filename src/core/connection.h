@@ -688,6 +688,18 @@ typedef struct QUIC_CONNECTION {
         QUIC_FLOW_BLOCKED_TIMING_TRACKER FlowControl;
     } BlockedTimings;
 
+    //
+    // Receiver-side bandwidth measurement for RAN optimization.
+    //
+    struct {
+        uint64_t LastUpdateTime;           // Last time bandwidth was measured (microseconds)
+        uint64_t SmoothedBandwidth;        // Smoothed bandwidth estimate (bps)
+        uint64_t PeakBandwidth;            // Peak bandwidth observed (bps)
+        uint64_t TotalBytesReceived;       // Total bytes received for measurement
+        uint64_t MeasurementStartTime;     // Start time of current measurement window
+        uint32_t SampleCount;              // Number of bandwidth samples collected
+    } ReceiverBandwidthMeasurement;
+
 } QUIC_CONNECTION;
 
 typedef struct QUIC_SERIALIZED_RESUMPTION_STATE {

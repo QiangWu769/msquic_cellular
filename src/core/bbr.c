@@ -13,6 +13,9 @@ Abstract:
 #ifdef QUIC_CLOG
 #include "bbr.c.clog.h"
 #endif
+#ifdef QUIC_ENHANCED_PACKET_LOGGING
+#include "bbr_packet_level_logging.h"
+#endif
 
 typedef enum BBR_STATE {
 
@@ -35,6 +38,22 @@ typedef enum RECOVERY_STATE {
     RECOVERY_STATE_GROWTH = 2,
 
 } RECOVERY_STATE;
+
+//
+// Forward declarations
+//
+_IRQL_requires_max_(DISPATCH_LEVEL)
+void
+BbrCongestionControlLogPacketSent(
+    _In_ const QUIC_CONGESTION_CONTROL* Cc,
+    _In_ uint32_t PacketSize
+    );
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+void
+BbrCongestionControlGeneratePerformanceSummary(
+    _In_ const QUIC_CONGESTION_CONTROL* Cc
+    );
 
 //
 // Bandwidth is measured as (bytes / BW_UNIT) per second
@@ -109,6 +128,14 @@ const uint32_t kBbrMaxBandwidthFilterLen = 10;
 
 const uint32_t kBbrMaxAckHeightFilterLen = 10;
 
+#ifdef QUIC_ENHANCED_PACKET_LOGGING
+//
+// Global BBR packet level logger
+//
+static BBR_PACKET_LOGGER g_BbrPacketLogger = { 0 };
+static BOOLEAN g_BbrPacketLoggerInitialized = FALSE;
+#endif
+
 _IRQL_requires_max_(DISPATCH_LEVEL)
 void
 BbrBandwidthFilterOnPacketAcked(
@@ -134,13 +161,14 @@ BbrBandwidthFilterOnPacketAcked(
 
         uint64_t SendRate = UINT64_MAX;
         uint64_t AckRate = UINT64_MAX;
+        uint64_t SendElapsed = 0;  // Declare outside of if block for later use
+        uint64_t AckElapsed = 0;   // Declare outside of if block for later use
 
         if (AckedPacket->Flags.HasLastAckedPacketInfo) {
             CXPLAT_DBG_ASSERT(AckedPacket->TotalBytesSent >= AckedPacket->LastAckedPacketInfo.TotalBytesSent);
             CXPLAT_DBG_ASSERT(CxPlatTimeAtOrBefore64(AckedPacket->LastAckedPacketInfo.SentTime, AckedPacket->SentTime));
 
-            uint64_t AckElapsed = 0;
-            uint64_t SendElapsed = CxPlatTimeDiff64(AckedPacket->LastAckedPacketInfo.SentTime, AckedPacket->SentTime);
+            SendElapsed = CxPlatTimeDiff64(AckedPacket->LastAckedPacketInfo.SentTime, AckedPacket->SentTime);
 
             if (SendElapsed) {
                 SendRate = (kMicroSecsInSec * BW_UNIT *
@@ -184,6 +212,8 @@ BbrBandwidthFilterOnPacketAcked(
         if (DeliveryRate >= PreviousMaxDeliveryRate || !AckedPacket->Flags.IsAppLimited) {
             QuicSlidingWindowExtremumUpdateMax(&b->WindowedMaxFilter, DeliveryRate, RttCounter);
         }
+
+        // TODO: Add delay tracking here later when CLOG issues are resolved
     }
 }
 
@@ -433,6 +463,8 @@ BbrCongestionControlOnDataSent(
         Bbr->ExitingQuiescence = TRUE;
     }
 
+
+
     Bbr->BytesInFlight += NumRetransmittableBytes;
     if (Bbr->BytesInFlightMax < Bbr->BytesInFlight) {
         Bbr->BytesInFlightMax = Bbr->BytesInFlight;
@@ -443,7 +475,79 @@ BbrCongestionControlOnDataSent(
         --Bbr->Exemptions;
     }
 
+    // Log BBR state for each packet transmission
+    // BbrCongestionControlLogPacketSent(Cc, NumRetransmittableBytes);
+
+#ifdef QUIC_ENHANCED_PACKET_LOGGING
+    // Enhanced packet level logging
+    if (g_BbrPacketLoggerInitialized) {
+        QUIC_CONNECTION* Connection = QuicCongestionControlGetConnection(Cc);
+        uint64_t PacketNumber = Connection->LossDetection.LargestSentPacketNumber + 1;
+        BbrPacketLevelLoggingRecordPacketSent(&g_BbrPacketLogger, Cc, PacketNumber, NumRetransmittableBytes);
+    }
+#endif
+
     BbrCongestionControlUpdateBlockedState(Cc, PreviousCanSendState);
+}
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+void
+BbrCongestionControlLogPacketSent(
+    _In_ const QUIC_CONGESTION_CONTROL* Cc,
+    _In_ uint32_t PacketSize
+    )
+{
+    const QUIC_CONNECTION* Connection = QuicCongestionControlGetConnection(Cc);
+    const QUIC_CONGESTION_CONTROL_BBR* Bbr = &Cc->Bbr;
+    const QUIC_PATH* Path = &Connection->Paths[0];
+    
+    uint64_t EstimatedBandwidth = BbrCongestionControlGetBandwidth(Cc);
+    uint32_t CongestionWindow = BbrCongestionControlGetCongestionWindow(Cc);
+    uint64_t SmoothedRtt = Path->GotFirstRttSample ? Path->SmoothedRtt : 0;
+    uint64_t MinRtt = Bbr->MinRtt != UINT64_MAX ? Bbr->MinRtt : 0;
+    uint32_t BytesInFlight = Bbr->BytesInFlight;
+    uint64_t TotalPacketsSent = Connection->Stats.Send.TotalPackets;
+    uint64_t TotalPacketsLost = Connection->Stats.Send.SuspectedLostPackets;
+    double LossRate = TotalPacketsSent > 0 ? ((double)TotalPacketsLost * 100.0) / (double)TotalPacketsSent : 0.0;
+
+    // Calculate pacing rate and delivery rate
+    uint64_t PacingRate = EstimatedBandwidth * Bbr->PacingGain / GAIN_UNIT;
+    uint64_t DeliveryRate = Bbr->RecentDeliveryRate;
+    
+    // Calculate connection duration
+    uint64_t CurrentTime = CxPlatTimeUs64();
+    uint64_t ConnectionDuration = CurrentTime - Connection->Stats.Timing.Start;
+    
+    // Write detailed BBR packet log to the same log file as periodic logs
+    FILE* logFile = fopen("/root/msquic/bbr_logs/bbr_log.txt", "a");
+    if (logFile != NULL) {
+        fprintf(logFile, "[BBR-PKT-SENT] T=%lu.%03lu s, PKT=%lu, Size=%u B, "
+               "EstBW=%.2f Mbps, PacingRate=%.2f Mbps, DeliveryRate=%.2f Mbps, "
+               "RTT=%lu us, MinRTT=%lu us, CWND=%u B, InFlight=%u B, "
+               "Loss=%.2f%%, State=%s, TotalSent=%lu, TotalLost=%lu, "
+               "SendDelay=%lu us, AckDelay=%lu us\n",
+               (unsigned long)(ConnectionDuration / 1000000),
+               (unsigned long)((ConnectionDuration % 1000000) / 1000),
+               (unsigned long)TotalPacketsSent,
+               PacketSize,
+               EstimatedBandwidth / 1000000.0,
+               PacingRate / 1000000.0,
+               DeliveryRate / 1000000.0,
+               (unsigned long)SmoothedRtt,
+               (unsigned long)MinRtt,
+               CongestionWindow,
+               BytesInFlight,
+               LossRate,
+               Bbr->BbrState == 0 ? "STARTUP" :
+               Bbr->BbrState == 1 ? "DRAIN" :
+               Bbr->BbrState == 2 ? "PROBE_BW" :
+               Bbr->BbrState == 3 ? "PROBE_RTT" : "UNKNOWN",
+               (unsigned long)TotalPacketsSent,
+               (unsigned long)TotalPacketsLost,
+               (unsigned long)Bbr->RecentSendDelay,
+               (unsigned long)Bbr->RecentAckDelay);
+        fclose(logFile);
+    }
 }
 
 _IRQL_requires_max_(DISPATCH_LEVEL)
@@ -805,6 +909,69 @@ BbrCongestionControlOnDataAcknowledged(
 
     BbrBandwidthFilterOnPacketAcked(&Bbr->BandwidthFilter, AckEvent, Bbr->RoundTripCounter);
 
+    // Update recent delivery rate tracking for logging
+    // Calculate delivery rate based on recent ACK events
+    QUIC_SENT_PACKET_METADATA* AckedPacketsIterator = AckEvent->AckedPackets;
+    while (AckedPacketsIterator != NULL) {
+        QUIC_SENT_PACKET_METADATA* AckedPacket = AckedPacketsIterator;
+        AckedPacketsIterator = AckedPacketsIterator->Next;
+
+        if (AckedPacket->PacketLength == 0) {
+            continue;
+        }
+
+        uint64_t SendRate = UINT64_MAX;
+        uint64_t AckRate = UINT64_MAX;
+        uint64_t TimeNow = AckEvent->TimeNow;
+
+        if (AckedPacket->Flags.HasLastAckedPacketInfo) {
+            uint64_t SendElapsed = CxPlatTimeDiff64(AckedPacket->LastAckedPacketInfo.SentTime, AckedPacket->SentTime);
+            if (SendElapsed) {
+                SendRate = (kMicroSecsInSec * BW_UNIT *
+                    (AckedPacket->TotalBytesSent - AckedPacket->LastAckedPacketInfo.TotalBytesSent) /
+                    SendElapsed);
+                // Record the actual send delay used in delivery rate calculation
+                Bbr->RecentSendDelay = SendElapsed;
+            }
+
+            uint64_t AckElapsed = 0;
+            if (!CxPlatTimeAtOrBefore64(AckEvent->AdjustedAckTime, AckedPacket->LastAckedPacketInfo.AdjustedAckTime)) {
+                AckElapsed = CxPlatTimeDiff64(AckedPacket->LastAckedPacketInfo.AdjustedAckTime, AckEvent->AdjustedAckTime);
+            } else {
+                AckElapsed = CxPlatTimeDiff64(AckedPacket->LastAckedPacketInfo.AckTime, TimeNow);
+            }
+
+            if (AckElapsed) {
+                AckRate = (kMicroSecsInSec * BW_UNIT *
+                           (AckEvent->NumTotalAckedRetransmittableBytes - AckedPacket->LastAckedPacketInfo.TotalBytesAcked) /
+                           AckElapsed);
+                // Record the actual ack delay used in delivery rate calculation
+                Bbr->RecentAckDelay = AckElapsed;
+            }
+        } else if (!CxPlatTimeAtOrBefore64(TimeNow, AckedPacket->SentTime)) {
+            uint64_t RttElapsed = CxPlatTimeDiff64(AckedPacket->SentTime, TimeNow);
+            SendRate = (kMicroSecsInSec * BW_UNIT *
+                        AckEvent->NumTotalAckedRetransmittableBytes /
+                        RttElapsed);
+            // Record RTT-based delay when no previous packet info available
+            Bbr->RecentSendDelay = RttElapsed;
+            Bbr->RecentAckDelay = RttElapsed;
+        }
+
+        if (SendRate != UINT64_MAX || AckRate != UINT64_MAX) {
+            uint64_t DeliveryRate = CXPLAT_MIN(SendRate, AckRate);
+            if (DeliveryRate != UINT64_MAX) {
+                Bbr->RecentSendRate = SendRate;
+                Bbr->RecentAckRate = AckRate;
+                Bbr->RecentDeliveryRate = DeliveryRate;
+                
+
+                
+                break; // Use the first valid delivery rate
+            }
+        }
+    }
+
     if (BbrCongestionControlInRecovery(Cc)) {
         CXPLAT_DBG_ASSERT(Bbr->EndOfRecoveryValid);
         if (NewRoundTrip && Bbr->RecoveryState != RECOVERY_STATE_GROWTH) {
@@ -882,9 +1049,76 @@ BbrCongestionControlOnDataAcknowledged(
     BbrCongestionControlUpdateCongestionWindow(
         Cc, AckEvent->NumTotalAckedRetransmittableBytes, AckEvent->NumRetransmittableBytes);
 
+    // Log each acknowledged packet (disabled for periodic logging)
+    /*
+    if (AckEvent->AckedPackets != NULL) {
+        const QUIC_PATH* Path = &Connection->Paths[0];
+        QUIC_SENT_PACKET_METADATA* AckedPacket = AckEvent->AckedPackets;
+        while (AckedPacket != NULL) {
+            // Calculate BBR metrics for this ACK event
+            uint64_t EstimatedBandwidth = BbrCongestionControlGetBandwidth(Cc);
+            uint32_t CongestionWindow = BbrCongestionControlGetCongestionWindow(Cc);
+            uint64_t SmoothedRtt = Path->GotFirstRttSample ? Path->SmoothedRtt : 0;
+            uint64_t MinRtt = Bbr->MinRtt != UINT64_MAX ? Bbr->MinRtt : 0;
+            uint64_t PacingRate = EstimatedBandwidth * Bbr->PacingGain / GAIN_UNIT;
+            uint64_t DeliveryRate = Bbr->RecentDeliveryRate;
+            
+            // Calculate connection duration
+            uint64_t ConnectionDuration = AckEvent->TimeNow - Connection->Stats.Timing.Start;
+            
+            // Calculate loss rate
+            uint64_t TotalSent = Connection->Stats.Send.TotalPackets;
+            uint64_t TotalLost = Connection->Stats.Send.SuspectedLostPackets;
+            double LossRate = TotalSent > 0 ? ((double)TotalLost * 100.0) / (double)TotalSent : 0.0;
+            
+            // Print per-packet ACK log
+            printf("[BBR-PKT-ACKED] T=%lu.%03lu s, PKT=%lu, Size=%u B, "
+                   "EstBW=%.2f Mbps, PacingRate=%.2f Mbps, DeliveryRate=%.2f Mbps, "
+                   "RTT=%lu us, MinRTT=%lu us, CWND=%u B, InFlight=%u B, "
+                   "Loss=%.2f%%, State=%s, TotalSent=%lu, TotalLost=%lu\n",
+                   (unsigned long)(ConnectionDuration / 1000000),
+                   (unsigned long)((ConnectionDuration % 1000000) / 1000),
+                   (unsigned long)AckedPacket->PacketNumber,
+                   AckedPacket->PacketLength,
+                   EstimatedBandwidth / 1000000.0,
+                   PacingRate / 1000000.0,
+                   DeliveryRate / 1000000.0,
+                   (unsigned long)SmoothedRtt,
+                   (unsigned long)MinRtt,
+                   CongestionWindow,
+                   Bbr->BytesInFlight,
+                   LossRate,
+                   Bbr->BbrState == 0 ? "STARTUP" :
+                   Bbr->BbrState == 1 ? "DRAIN" :
+                   Bbr->BbrState == 2 ? "PROBE_BW" :
+                   Bbr->BbrState == 3 ? "PROBE_RTT" : "UNKNOWN",
+                   (unsigned long)TotalSent,
+                   (unsigned long)TotalLost);
+            
+            AckedPacket = AckedPacket->Next;
+        }
+    }
+    */
+
+#ifdef QUIC_ENHANCED_PACKET_LOGGING
+    // Enhanced packet level logging for acknowledged packets
+    if (g_BbrPacketLoggerInitialized && AckEvent->AckedPackets != NULL) {
+        QUIC_SENT_PACKET_METADATA* AckedPacket = AckEvent->AckedPackets;
+        while (AckedPacket != NULL) {
+            BbrPacketLevelLoggingRecordPacketAcknowledged(
+                &g_BbrPacketLogger, Cc, AckedPacket->PacketNumber, 
+                AckedPacket->PacketLength, AckEvent->TimeNow);
+            AckedPacket = AckedPacket->Next;
+        }
+    }
+#endif
+
     if (Connection->Settings.NetStatsEventEnabled) {
         BbrCongestionControlIndicateConnectionEvent(Connection, Cc);
     }
+
+    // Generate periodic log
+    BbrCongestionControlPeriodicLog(Cc);
 
     return BbrCongestionControlUpdateBlockedState(Cc, PreviousCanSendState);
 }
@@ -918,6 +1152,62 @@ BbrCongestionControlOnDataLost(
 
     CXPLAT_DBG_ASSERT(Bbr->BytesInFlight >= LossEvent->NumRetransmittableBytes);
     Bbr->BytesInFlight -= LossEvent->NumRetransmittableBytes;
+
+    // Log packet loss event (disabled for periodic logging)
+    /*
+    {
+        const QUIC_PATH* Path = &Connection->Paths[0];
+        uint64_t EstimatedBandwidth = BbrCongestionControlGetBandwidth(Cc);
+        uint32_t CongestionWindow = BbrCongestionControlGetCongestionWindow(Cc);
+        uint64_t SmoothedRtt = Path->GotFirstRttSample ? Path->SmoothedRtt : 0;
+        uint64_t MinRtt = Bbr->MinRtt != UINT64_MAX ? Bbr->MinRtt : 0;
+        uint64_t PacingRate = EstimatedBandwidth * Bbr->PacingGain / GAIN_UNIT;
+        uint64_t DeliveryRate = Bbr->RecentDeliveryRate;
+        
+        // Calculate connection duration
+        uint64_t CurrentTime = CxPlatTimeUs64();
+        uint64_t ConnectionDuration = CurrentTime - Connection->Stats.Timing.Start;
+        
+        // Calculate loss rate
+        uint64_t TotalSent = Connection->Stats.Send.TotalPackets;
+        uint64_t TotalLost = Connection->Stats.Send.SuspectedLostPackets;
+        double LossRate = TotalSent > 0 ? ((double)TotalLost * 100.0) / (double)TotalSent : 0.0;
+        
+        // Print packet loss log
+        printf("[BBR-PKT-LOST] T=%lu.%03lu s, PKT=%lu, Size=%u B, "
+               "EstBW=%.2f Mbps, PacingRate=%.2f Mbps, DeliveryRate=%.2f Mbps, "
+               "RTT=%lu us, MinRTT=%lu us, CWND=%u B, InFlight=%u B, "
+               "Loss=%.2f%%, State=%s, TotalSent=%lu, TotalLost=%lu, PersistentCongestion=%s\n",
+               (unsigned long)(ConnectionDuration / 1000000),
+               (unsigned long)((ConnectionDuration % 1000000) / 1000),
+               (unsigned long)LossEvent->LargestPacketNumberLost,
+               LossEvent->NumRetransmittableBytes,
+               EstimatedBandwidth / 1000000.0,
+               PacingRate / 1000000.0,
+               DeliveryRate / 1000000.0,
+               (unsigned long)SmoothedRtt,
+               (unsigned long)MinRtt,
+               CongestionWindow,
+               Bbr->BytesInFlight,
+               LossRate,
+               Bbr->BbrState == 0 ? "STARTUP" :
+               Bbr->BbrState == 1 ? "DRAIN" :
+               Bbr->BbrState == 2 ? "PROBE_BW" :
+               Bbr->BbrState == 3 ? "PROBE_RTT" : "UNKNOWN",
+               (unsigned long)TotalSent,
+               (unsigned long)TotalLost,
+               LossEvent->PersistentCongestion ? "YES" : "NO");
+    }
+    */
+
+#ifdef QUIC_ENHANCED_PACKET_LOGGING
+    // Enhanced packet level logging for lost packets
+    if (g_BbrPacketLoggerInitialized) {
+        // Log the largest lost packet number as a representative
+        BbrPacketLevelLoggingRecordPacketLost(
+            &g_BbrPacketLogger, Cc, LossEvent->LargestPacketNumberLost, LossEvent->NumRetransmittableBytes);
+    }
+#endif
 
     uint32_t RecoveryWindow = Bbr->RecoveryWindow;
     uint32_t MinCongestionWindow = kMinCwndInMss * DatagramPayloadLength;
@@ -988,7 +1278,6 @@ BbrCongestionControlReset(
     )
 {
     QUIC_CONGESTION_CONTROL_BBR* Bbr = &Cc->Bbr;
-
     QUIC_CONNECTION* Connection = QuicCongestionControlGetConnection(Cc);
 
     const uint16_t DatagramPayloadLength =
@@ -1039,6 +1328,11 @@ BbrCongestionControlReset(
     Bbr->MinRtt = UINT64_MAX;
     Bbr->MinRttTimestamp = 0;
 
+    // Initialize recent delivery rate tracking fields
+    Bbr->RecentSendRate = 0;
+    Bbr->RecentAckRate = 0;
+    Bbr->RecentDeliveryRate = 0;
+
     QuicSlidingWindowExtremumReset(&Bbr->MaxAckHeightFilter);
 
     QuicSlidingWindowExtremumReset(&Bbr->BandwidthFilter.WindowedMaxFilter);
@@ -1068,6 +1362,7 @@ static const QUIC_CONGESTION_CONTROL QuicCongestionControlBbr = {
     .QuicCongestionControlGetBytesInFlightMax = BbrCongestionControlGetBytesInFlightMax,
     .QuicCongestionControlIsAppLimited = BbrCongestionControlIsAppLimited,
     .QuicCongestionControlSetAppLimited = BbrCongestionControlSetAppLimited,
+    .QuicCongestionControlLogPacketSent = BbrCongestionControlLogPacketSent,
 };
 
 _IRQL_requires_max_(DISPATCH_LEVEL)
@@ -1141,6 +1436,233 @@ BbrCongestionControlInitialize(
         .AppLimitedExitTarget = 0,
     };
 
+    // Initialize periodic logging fields
+    Bbr->LastPeriodicLogTime = CxPlatTimeUs64();
+    Bbr->LastLoggedSendBytes = 0;
+    Bbr->LastLoggedRecvBytes = 0;
+    Bbr->LastLoggedSentPackets = 0;
+    Bbr->LastLoggedLostPackets = 0;
+
+    // Initialize delay tracking fields
+    Bbr->RecentSendDelay = 0;
+    Bbr->RecentAckDelay = 0;
+
     QuicConnLogOutFlowStats(Connection);
     QuicConnLogBbr(Connection);
+
+#ifdef QUIC_ENHANCED_PACKET_LOGGING
+    // Initialize the global BBR packet logger if not already done
+    if (!g_BbrPacketLoggerInitialized) {
+        if (QUIC_SUCCEEDED(BbrPacketLevelLoggingInitialize(&g_BbrPacketLogger, 10000))) {
+            g_BbrPacketLoggerInitialized = TRUE;
+            printf("BBR Enhanced Packet Logging: Initialized with 10000 entries\n");
+        }
+    }
+#endif
+}
+
+//
+// Generate BBR performance summary when connection ends
+//
+_IRQL_requires_max_(PASSIVE_LEVEL)
+void
+BbrCongestionControlGeneratePerformanceSummary(
+    _In_ const QUIC_CONGESTION_CONTROL* Cc
+    )
+{
+    const QUIC_CONNECTION* Connection = QuicCongestionControlGetConnection(Cc);
+    const QUIC_CONGESTION_CONTROL_BBR* Bbr = &Cc->Bbr;
+    const QUIC_PATH* Path = &Connection->Paths[0];
+    
+    // Use a simple flag to ensure we only print once per connection
+    // This is a simple approach - in production you might want a more sophisticated mechanism
+    static const QUIC_CONNECTION* LastConnection = NULL;
+    if (LastConnection == Connection) {
+        return; // Already printed for this connection
+    }
+    LastConnection = Connection;
+    
+    // Calculate connection duration
+    uint64_t CurrentTime = CxPlatTimeUs64();
+    uint64_t ConnectionDuration = CurrentTime - Connection->Stats.Timing.Start;
+    
+    // Calculate bandwidth metrics
+    uint64_t EstimatedBandwidth = BbrCongestionControlGetBandwidth(Cc);
+    uint32_t CongestionWindow = BbrCongestionControlGetCongestionWindow(Cc);
+    
+    // Calculate loss rate
+    uint64_t TotalSent = Connection->Stats.Send.TotalPackets;
+    uint64_t TotalLost = Connection->Stats.Send.SuspectedLostPackets;
+    uint32_t LossRate = TotalSent > 0 ? (uint32_t)((TotalLost * 10000) / TotalSent) : 0;
+    
+    // Calculate actual bandwidth from bytes transferred
+    uint64_t SendBytes = Connection->Stats.Send.TotalBytes;
+    uint64_t RecvBytes = Connection->Stats.Recv.TotalBytes;
+    uint64_t TotalBytes = SendBytes + RecvBytes;
+    
+    double SendBandwidthMbps = 0.0;
+    double RecvBandwidthMbps = 0.0;
+    double TotalBandwidthMbps = 0.0;
+    
+    if (ConnectionDuration > 0) {
+        // Convert: bytes -> bits -> Mbps
+        // bytes * 8 = bits, ConnectionDuration is in microseconds
+        // (bits * 1,000,000) / ConnectionDuration = bits per second
+        // bits per second / 1,000,000 = Mbps
+        SendBandwidthMbps = ((double)SendBytes * 8.0 * 1000000.0) / ((double)ConnectionDuration * 1000000.0);
+        RecvBandwidthMbps = ((double)RecvBytes * 8.0 * 1000000.0) / ((double)ConnectionDuration * 1000000.0);
+        TotalBandwidthMbps = ((double)TotalBytes * 8.0 * 1000000.0) / ((double)ConnectionDuration * 1000000.0);
+    }
+    
+    // Print BBR performance summary to file
+    FILE* summaryFile = fopen("/root/msquic/bbr_logs/bbr_summary.txt", "w");
+    if (summaryFile != NULL) {
+        fprintf(summaryFile, "\n=== BBR Performance Summary ===\n");
+        fprintf(summaryFile, "Connection Duration: %lu.%03lu s\n", 
+               (unsigned long)(ConnectionDuration / 1000000), 
+               (unsigned long)((ConnectionDuration % 1000000) / 1000));
+        fprintf(summaryFile, "Debug: Start Time: %lu us, Current Time: %lu us, Duration: %lu us\n",
+               (unsigned long)Connection->Stats.Timing.Start,
+               (unsigned long)CurrentTime,
+               (unsigned long)ConnectionDuration);
+        fprintf(summaryFile, "BBR State: %s\n", 
+               Bbr->BbrState == 0 ? "STARTUP" :
+               Bbr->BbrState == 1 ? "DRAIN" :
+               Bbr->BbrState == 2 ? "PROBE_BW" :
+               Bbr->BbrState == 3 ? "PROBE_RTT" : "UNKNOWN");
+        fprintf(summaryFile, "Estimated Bandwidth: %.2f Mbps\n", EstimatedBandwidth / 1000000.0);
+        fprintf(summaryFile, "Send Bandwidth: %.2f Mbps\n", SendBandwidthMbps);
+        fprintf(summaryFile, "Recv Bandwidth: %.2f Mbps\n", RecvBandwidthMbps);
+        fprintf(summaryFile, "Total Bandwidth: %.2f Mbps\n", TotalBandwidthMbps);
+        fprintf(summaryFile, "Congestion Window: %u bytes\n", CongestionWindow);
+        fprintf(summaryFile, "Pacing Gain: %.2fx\n", (double)Bbr->PacingGain / (double)GAIN_UNIT);
+        fprintf(summaryFile, "Cwnd Gain: %.2fx\n", (double)Bbr->CwndGain / (double)GAIN_UNIT);
+        fprintf(summaryFile, "RTT: %lu us (Min: %lu us)\n", 
+               (unsigned long)(Path->GotFirstRttSample ? Path->SmoothedRtt : 0), 
+               (unsigned long)Bbr->MinRtt);
+        fprintf(summaryFile, "Packets Sent: %lu\n", (unsigned long)TotalSent);
+        fprintf(summaryFile, "Packets Lost: %lu (%.2f%%)\n", (unsigned long)TotalLost, LossRate / 100.0);
+        fprintf(summaryFile, "Congestion Events: %u\n", Connection->Stats.Send.CongestionCount);
+        fprintf(summaryFile, "Bytes Sent: %lu bytes\n", (unsigned long)SendBytes);
+        fprintf(summaryFile, "Bytes Received: %lu bytes\n", (unsigned long)RecvBytes);
+        fprintf(summaryFile, "Total Bytes: %lu bytes\n", (unsigned long)TotalBytes);
+        fprintf(summaryFile, "Bytes In Flight: %u bytes\n", Bbr->BytesInFlight);
+        fprintf(summaryFile, "App Limited: %s\n", BbrCongestionControlIsAppLimited(Cc) ? "YES" : "NO");
+        fprintf(summaryFile, "==============================\n\n");
+        fclose(summaryFile);
+    }
+}
+
+//
+// Generate periodic BBR performance log (every second)
+//
+_IRQL_requires_max_(DISPATCH_LEVEL)
+void
+BbrCongestionControlPeriodicLog(
+    _In_ QUIC_CONGESTION_CONTROL* Cc
+    )
+{
+    QUIC_CONNECTION* Connection = QuicCongestionControlGetConnection(Cc);
+    QUIC_CONGESTION_CONTROL_BBR* Bbr = &Cc->Bbr;
+    const QUIC_PATH* Path = &Connection->Paths[0];
+    
+    uint64_t CurrentTime = CxPlatTimeUs64();
+    uint64_t TimeSinceLastLog = CurrentTime - Bbr->LastPeriodicLogTime;
+    
+    // Log every 10ms (10,000 microseconds)
+    if (TimeSinceLastLog < 10000) {
+        return;
+    }
+    
+    // Get current statistics
+    uint64_t CurrentSendBytes = Connection->Stats.Send.TotalBytes;
+    uint64_t CurrentRecvBytes = Connection->Stats.Recv.TotalBytes;
+    uint64_t CurrentSentPackets = Connection->Stats.Send.TotalPackets;
+    uint64_t CurrentLostPackets = Connection->Stats.Send.SuspectedLostPackets;
+    
+    // Calculate deltas since last log
+    uint64_t DeltaSendBytes = CurrentSendBytes - Bbr->LastLoggedSendBytes;
+    uint64_t DeltaRecvBytes = CurrentRecvBytes - Bbr->LastLoggedRecvBytes;
+    uint64_t DeltaSentPackets = CurrentSentPackets - Bbr->LastLoggedSentPackets;
+    uint64_t DeltaLostPackets = CurrentLostPackets - Bbr->LastLoggedLostPackets;
+    
+    // Calculate bandwidth (convert to Mbps)
+    double SendBandwidthMbps = 0.0;
+    double RecvBandwidthMbps = 0.0;
+    double TotalBandwidthMbps = 0.0;
+    
+    if (TimeSinceLastLog > 0) {
+        // Convert: bytes -> bits -> Mbps
+        // (bytes * 8 * 1,000,000) / TimeSinceLastLog = bits per second
+        // bits per second / 1,000,000 = Mbps
+        SendBandwidthMbps = ((double)DeltaSendBytes * 8.0 * 1000000.0) / ((double)TimeSinceLastLog * 1000000.0);
+        RecvBandwidthMbps = ((double)DeltaRecvBytes * 8.0 * 1000000.0) / ((double)TimeSinceLastLog * 1000000.0);
+        TotalBandwidthMbps = SendBandwidthMbps + RecvBandwidthMbps;
+    }
+    
+    // Use delta lost packets for this time interval
+    uint64_t IntervalLostPackets = DeltaLostPackets;
+    
+    // Get BBR metrics
+    uint64_t EstimatedBandwidth = BbrCongestionControlGetBandwidth(Cc);
+    uint32_t CongestionWindow = BbrCongestionControlGetCongestionWindow(Cc);
+    uint64_t SmoothedRtt = Path->GotFirstRttSample ? Path->SmoothedRtt : 0;
+    uint64_t MinRtt = Bbr->MinRtt != UINT64_MAX ? Bbr->MinRtt : 0;
+    
+    // Calculate pacing rate: Bandwidth * PacingGain / GAIN_UNIT
+    uint64_t PacingRate = EstimatedBandwidth * Bbr->PacingGain / GAIN_UNIT;
+    double PacingRateMbps = PacingRate / 1000000.0;
+    
+    // Debug: Show pacing gain value
+    double PacingGainRatio = (double)Bbr->PacingGain / (double)GAIN_UNIT;
+    
+    // Get delivery rate from BBR structure (already calculated as min(send rate, ack rate))
+    uint64_t DeliveryRate = Bbr->RecentDeliveryRate;
+    double DeliveryRateMbps = DeliveryRate / 1000000.0;
+    
+    // Calculate connection duration
+    uint64_t ConnectionDuration = CurrentTime - Connection->Stats.Timing.Start;
+    
+    // Print periodic log to file
+    FILE* logFile = fopen("/root/msquic/bbr_logs/bbr_log.txt", "a");
+    if (logFile != NULL) {
+        fprintf(logFile, "[BBR-LOG] T=%lu.%03lu s, Send=%.2f Mbps, Recv=%.2f Mbps, Total=%.2f Mbps, "
+                "EstBW=%.2f Mbps, PacingRate=%.2f Mbps, PacingGain=%.2fx, CwndGain=%.2fx, DeliveryRate=%.2f Mbps, "
+                "RTT=%lu us, MinRTT=%lu us, CWND=%u B, InFlight=%u B, "
+                "Lost=%lu, State=%s, Pkts=%lu/%lu, Bytes=%lu/%lu, "
+                "SendDelay=%lu us, AckDelay=%lu us\n",
+                (unsigned long)(ConnectionDuration / 1000000),
+                (unsigned long)((ConnectionDuration % 1000000) / 1000),
+                SendBandwidthMbps,
+                RecvBandwidthMbps,
+                TotalBandwidthMbps,
+                EstimatedBandwidth / 1000000.0,
+                PacingRateMbps,
+                PacingGainRatio,
+                (double)Bbr->CwndGain / (double)GAIN_UNIT,
+                DeliveryRateMbps,
+                (unsigned long)SmoothedRtt,
+                (unsigned long)MinRtt,
+                CongestionWindow,
+                Bbr->BytesInFlight,
+                (unsigned long)IntervalLostPackets,
+                Bbr->BbrState == 0 ? "STARTUP" :
+                Bbr->BbrState == 1 ? "DRAIN" :
+                Bbr->BbrState == 2 ? "PROBE_BW" :
+                Bbr->BbrState == 3 ? "PROBE_RTT" : "UNKNOWN",
+                (unsigned long)DeltaSentPackets,
+                (unsigned long)DeltaLostPackets,
+                (unsigned long)DeltaSendBytes,
+                (unsigned long)DeltaRecvBytes,
+                (unsigned long)Bbr->RecentSendDelay,
+                (unsigned long)Bbr->RecentAckDelay);
+        fclose(logFile);
+    }
+    
+    // Update last logged values
+    Bbr->LastPeriodicLogTime = CurrentTime;
+    Bbr->LastLoggedSendBytes = CurrentSendBytes;
+    Bbr->LastLoggedRecvBytes = CurrentRecvBytes;
+    Bbr->LastLoggedSentPackets = CurrentSentPackets;
+    Bbr->LastLoggedLostPackets = CurrentLostPackets;
 }

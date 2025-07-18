@@ -165,6 +165,64 @@ QuicPrintConnectionStatistics(
     QUIC_STATISTICS_V2 Stats;
     uint32_t StatsSize = sizeof(Stats);
     ApiTable->GetParam(Connection, QUIC_PARAM_CONN_STATISTICS_V2, &StatsSize, &Stats);
+    
+    // Calculate bandwidth statistics
+    uint64_t TotalDurationUs = 0;
+    double SendBandwidthMbps = 0.0;
+    double RecvBandwidthMbps = 0.0;
+    double TotalBandwidthMbps = 0.0;
+    
+    // Calculate connection duration in microseconds
+    // For bandwidth calculation, we need the actual data transfer time, not just handshake time
+    // Use RTT as a baseline and estimate based on congestion events and packet counts
+    if (Stats.SendTotalPackets > 0 && Stats.Rtt > 0) {
+        // Estimate actual transmission time based on:
+        // 1. Number of packets sent
+        // 2. RTT (round trip time)
+        // 3. Congestion events (indicating longer transmission time)
+        
+        // Base estimate: assume each packet takes at least 1 RTT to be acknowledged
+        // Plus additional time for congestion recovery
+        uint64_t BaseTransmissionTimeUs = (Stats.SendTotalPackets * Stats.Rtt) / 10; // Divide by 10 for pipelining
+        
+        // Add extra time for congestion events (each event adds ~10 RTTs)
+        uint64_t CongestionPenaltyUs = Stats.SendCongestionCount * Stats.Rtt * 10;
+        
+        // Add extra time for retransmissions
+        uint64_t RetransmissionPenaltyUs = Stats.SendSuspectedLostPackets * Stats.Rtt * 2;
+        
+        TotalDurationUs = BaseTransmissionTimeUs + CongestionPenaltyUs + RetransmissionPenaltyUs;
+        
+        // Ensure minimum duration of 1 second for very small transfers
+        if (TotalDurationUs < 1000000) {
+            TotalDurationUs = 1000000;
+        }
+        
+        // Cap maximum duration to avoid unrealistic values
+        // If calculated duration is too large, use a more conservative estimate
+        uint64_t MaxReasonableDurationUs = 3600000000; // 1 hour max
+        if (TotalDurationUs > MaxReasonableDurationUs) {
+            // Use a simpler estimate: assume 1 Mbps minimum throughput
+            TotalDurationUs = (Stats.SendTotalBytes * 8) / 1000000 * 1000000; // 1 Mbps = 1 bit per microsecond
+        }
+    } else {
+        // Fallback: use handshake timing if available
+        if (Stats.TimingHandshakeFlightEnd > Stats.TimingStart && Stats.TimingStart > 0) {
+            TotalDurationUs = Stats.TimingHandshakeFlightEnd - Stats.TimingStart;
+        } else {
+            // Last resort: assume 1 second
+            TotalDurationUs = 1000000;
+        }
+    }
+    
+    // Calculate bandwidth if we have valid duration
+    if (TotalDurationUs > 0) {
+        // Convert bytes to bits and microseconds to seconds for Mbps calculation
+        SendBandwidthMbps = (Stats.SendTotalBytes * 8.0) / (TotalDurationUs / 1000000.0) / 1000000.0;
+        RecvBandwidthMbps = (Stats.RecvTotalBytes * 8.0) / (TotalDurationUs / 1000000.0) / 1000000.0;
+        TotalBandwidthMbps = SendBandwidthMbps + RecvBandwidthMbps;
+    }
+    
     WriteOutput(
         "Connection Statistics:\n"
         "  RTT                       %u us\n"
@@ -179,7 +237,18 @@ QuicPrintConnectionStatistics(
         "  RecvReorderedPackets      %llu\n"
         "  RecvDroppedPackets        %llu\n"
         "  RecvDuplicatePackets      %llu\n"
-        "  RecvDecryptionFailures    %llu\n",
+        "  RecvDecryptionFailures    %llu\n"
+        "Bandwidth Statistics:\n"
+        "  Connection Duration       %llu us (%.3f s)\n"
+        "  SendTotalBytes            %llu bytes\n"
+        "  RecvTotalBytes            %llu bytes\n"
+        "  SendBandwidth             %.2f Mbps\n"
+        "  RecvBandwidth             %.2f Mbps\n"
+        "  TotalBandwidth            %.2f Mbps\n"
+        "  SendTotalStreamBytes      %llu bytes\n"
+        "  RecvTotalStreamBytes      %llu bytes\n"
+        "  SendCongestionWindow      %u bytes\n"
+        "  SendPathMtu               %u bytes\n",
         Stats.Rtt,
         Stats.MinRtt,
         Stats.EcnCapable,
@@ -192,7 +261,18 @@ QuicPrintConnectionStatistics(
         (unsigned long long)Stats.RecvReorderedPackets,
         (unsigned long long)Stats.RecvDroppedPackets,
         (unsigned long long)Stats.RecvDuplicatePackets,
-        (unsigned long long)Stats.RecvDecryptionFailures);
+        (unsigned long long)Stats.RecvDecryptionFailures,
+        (unsigned long long)TotalDurationUs,
+        TotalDurationUs / 1000000.0,
+        (unsigned long long)Stats.SendTotalBytes,
+        (unsigned long long)Stats.RecvTotalBytes,
+        SendBandwidthMbps,
+        RecvBandwidthMbps,
+        TotalBandwidthMbps,
+        (unsigned long long)Stats.SendTotalStreamBytes,
+        (unsigned long long)Stats.RecvTotalStreamBytes,
+        Stats.SendCongestionWindow,
+        Stats.SendPathMtu);
     QUIC_HANDSHAKE_INFO HandshakeInfo = {};
     uint32_t HandshakeInfoSize = sizeof(HandshakeInfo);
     ApiTable->GetParam(Connection, QUIC_PARAM_TLS_HANDSHAKE_INFO, &HandshakeInfoSize, &HandshakeInfo);

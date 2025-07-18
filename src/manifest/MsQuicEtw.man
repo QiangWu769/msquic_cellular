@@ -1569,6 +1569,60 @@
                 name="IsAppLimited"
                 />
           </template>
+          <template tid="tid_CONN_BBR_PACKET_SENT">
+            <data
+                inType="win:Pointer"
+                name="Connection"
+                />
+            <data
+                inType="win:UInt32"
+                name="PacketSize"
+                />
+            <data
+                inType="win:UInt64"
+                name="EstBw"
+                />
+            <data
+                inType="win:UInt64"
+                name="SmoothedRtt"
+                />
+            <data
+                inType="win:UInt64"
+                name="MinRtt"
+                />
+            <data
+                inType="win:UInt32"
+                name="CongestionWindow"
+                />
+            <data
+                inType="win:UInt32"
+                name="BytesInFlight"
+                />
+            <data
+                inType="win:UInt32"
+                name="PacketsInFlight"
+                />
+            <data
+                inType="win:UInt32"
+                name="BbrState"
+                />
+            <data
+                inType="win:UInt32"
+                name="RecoveryState"
+                />
+            <data
+                inType="win:UInt64"
+                name="TotalPacketsSent"
+                />
+            <data
+                inType="win:UInt64"
+                name="TotalPacketsLost"
+                />
+            <data
+                inType="win:UInt64"
+                name="LossRate"
+                />
+          </template>
           <template tid="tid_STREAM">
             <data
                 inType="win:Pointer"
@@ -3369,6 +3423,15 @@
               value="5186"
               />
           <event
+              keywords="ut:Connection ut:DataFlow"
+              level="win:Verbose"
+              message="$(string.Etw.BbrPacketSent)"
+              opcode="Connection"
+              symbol="QuicConnBbrPacketSent"
+              template="tid_CONN_BBR_PACKET_SENT"
+              value="5196"
+              />
+          <event
               keywords="ut:Connection ut:LowVolume"
               level="win:Informational"
               message="$(string.Etw.ConnEcnCapable)"
@@ -3913,6 +3976,33 @@
               symbol="QuicPacketDecrypt"
               template="tid_ID"
               value="11269"
+              />
+          <event
+              keywords="ut:Connection ut:DataFlow"
+              level="win:Verbose"
+              message="$(string.Etw.Bbr)"
+              opcode="Connection"
+              symbol="QuicConnBbr"
+              template="tid_CONN_BBR"
+              value="5186"
+              />
+          <event
+              keywords="ut:Connection ut:DataFlow"
+              level="win:Verbose"
+              message="$(string.Etw.BbrPacketSent)"
+              opcode="Connection"
+              symbol="QuicConnBbrPacketSent"
+              template="tid_CONN_BBR_PACKET_SENT"
+              value="5196"
+              />
+          <event
+              keywords="ut:Connection ut:LowVolume"
+              level="win:Informational"
+              message="$(string.Etw.ConnEcnCapable)"
+              opcode="Connection"
+              symbol="QuicConnEcnCapable"
+              template="tid_CONN_ECN_CAPABLE"
+              value="5187"
               />
         </events>
       </provider>
@@ -5042,6 +5132,10 @@
         <string
             id="Etw.Bbr"
             value="[conn][%1] BBR: State=%2 RState=%3 CongestionWindow=%4 BytesInFlight=%5 BytesInFlightMax=%6 MinRttEst=%7 EstBw=%8 AppLimited=%9"
+            />
+        <string
+            id="Etw.BbrPacketSent"
+            value="[conn][%1] BBR_TX: PktSize=%2 BW=%3 RTT=%4 MinRTT=%5 CWnd=%6 InFlight=%7 PktsInFlight=%8 State=%9 RState=%10 TotalSent=%11 TotalLost=%12 LossRate=%13%%"
             />
         <string
             id="Etw.ConnEcnCapable"

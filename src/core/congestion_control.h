@@ -155,6 +155,11 @@ typedef struct QUIC_CONGESTION_CONTROL {
         _In_ struct QUIC_CONGESTION_CONTROL* Cc
         );
 
+    void (*QuicCongestionControlLogPacketSent)(
+        _In_ const struct QUIC_CONGESTION_CONTROL* Cc,
+        _In_ uint32_t PacketSize
+        );
+
     //
     // Algorithm specific state.
     //
@@ -369,4 +374,17 @@ QuicCongestionControlSetAppLimited(
     )
 {
     Cc->QuicCongestionControlSetAppLimited(Cc);
+}
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+QUIC_INLINE
+void
+QuicCongestionControlLogPacketSent(
+    _In_ const struct QUIC_CONGESTION_CONTROL* Cc,
+    _In_ uint32_t PacketSize
+    )
+{
+    if (Cc->QuicCongestionControlLogPacketSent != NULL) {
+        Cc->QuicCongestionControlLogPacketSent(Cc, PacketSize);
+    }
 }

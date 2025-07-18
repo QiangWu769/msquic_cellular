@@ -54,6 +54,11 @@ set(SOURCES
     sliding_window_extremum.c
 )
 
+# Add enhanced packet logging source if enabled
+if(QUIC_ENHANCED_PACKET_LOGGING)
+    list(APPEND SOURCES bbr_packet_level_logging.c)
+endif()
+
 add_library(core STATIC ${SOURCES})
 
 if(NOT QUIC_BUILD_SHARED)

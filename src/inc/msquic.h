@@ -1278,6 +1278,8 @@ typedef enum QUIC_CONNECTION_EVENT_TYPE {
     QUIC_CONNECTION_EVENT_RELIABLE_RESET_NEGOTIATED         = 16,   // Only indicated if QUIC_SETTINGS.ReliableResetEnabled is TRUE.
     QUIC_CONNECTION_EVENT_ONE_WAY_DELAY_NEGOTIATED          = 17,   // Only indicated if QUIC_SETTINGS.OneWayDelayEnabled is TRUE.
     QUIC_CONNECTION_EVENT_NETWORK_STATISTICS                = 18,   // Only indicated if QUIC_SETTINGS.EnableNetStatsEvent is TRUE.
+    QUIC_CONNECTION_EVENT_RECEIVER_BANDWIDTH_MEASUREMENT    = 19,   // Receiver-side bandwidth measurement for RAN optimization
+    QUIC_CONNECTION_EVENT_RAN_HANDOVER_DETECTED             = 20,   // RAN handover event detected
 #endif
 } QUIC_CONNECTION_EVENT_TYPE;
 

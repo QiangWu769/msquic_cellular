@@ -85,6 +85,7 @@ option(QUIC_BUILD_TOOLS "Builds the tools code" OFF)
 option(QUIC_BUILD_TEST "Builds the test code" OFF)
 option(QUIC_BUILD_PERF "Builds the perf code" OFF)
 option(QUIC_BUILD_SHARED "Builds msquic as a dynamic library" ON)
+option(QUIC_ENHANCED_PACKET_LOGGING "Enables enhanced packet-level transmission logging for BBR" OFF)
 option(QUIC_ENABLE_LOGGING "Enables logging" OFF)
 option(QUIC_ENABLE_SANITIZERS "Enables sanitizers" OFF)
 option(QUIC_ENABLE_POOL_ALLOC "Enables pool allocations" ON)
@@ -381,6 +382,10 @@ if(QUIC_TLS_LIB STREQUAL "quictls" OR QUIC_TLS_LIB STREQUAL "openssl")
     endif()
 endif()
 
+# BBR增强日志功能由 QUIC_ENHANCED_PACKET_LOGGING 选项控制
+# message(STATUS "Enabling BBR enhanced packet logging")
+# list(APPEND QUIC_COMMON_DEFINES QUIC_ENHANCED_PACKET_LOGGING=1)
+
 if(QUIC_ENABLE_LOGGING)
     if (QUIC_LOGGING_TYPE STREQUAL "etw")
         if (WIN32)
@@ -430,6 +435,11 @@ endif()
 
 if (NOT QUIC_ENABLE_LOGGING)
     list(APPEND QUIC_COMMON_DEFINES QUIC_EVENTS_STUB QUIC_LOGS_STUB)
+endif()
+
+if(QUIC_ENHANCED_PACKET_LOGGING)
+    message(STATUS "Configuring for enhanced packet-level BBR logging")
+    list(APPEND QUIC_COMMON_DEFINES QUIC_ENHANCED_PACKET_LOGGING=1)
 endif()
 
 if (NOT MSVC AND NOT APPLE AND NOT ANDROID)

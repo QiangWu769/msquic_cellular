@@ -888,6 +888,7 @@ static const QUIC_CONGESTION_CONTROL QuicCongestionControlCubic = {
     .QuicCongestionControlIsAppLimited = CubicCongestionControlIsAppLimited,
     .QuicCongestionControlSetAppLimited = CubicCongestionControlSetAppLimited,
     .QuicCongestionControlGetCongestionWindow = CubicCongestionControlGetCongestionWindow,
+    .QuicCongestionControlLogPacketSent = NULL, // Cubic doesn't need per-packet logging
 };
 
 _IRQL_requires_max_(DISPATCH_LEVEL)

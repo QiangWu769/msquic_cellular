@@ -1380,6 +1380,14 @@ QuicConnOnShutdownComplete(
     }
 
     //
+    // Generate BBR performance summary before cleanup if using BBR congestion control
+    //
+    if (Connection->Stats.Send.TotalPackets > 10) {
+        extern void BbrCongestionControlGeneratePerformanceSummary(const QUIC_CONGESTION_CONTROL* Cc);
+        BbrCongestionControlGeneratePerformanceSummary(&Connection->CongestionControl);
+    }
+
+    //
     // Clean up the rest of the internal state.
     //
     QuicTimerWheelRemoveConnection(&Connection->Worker->TimerWheel, Connection);

@@ -213,6 +213,28 @@ typedef struct QUIC_CONGESTION_CONTROL_BBR {
     //
     BBR_BANDWIDTH_FILTER BandwidthFilter;
 
+    //
+    // Recent delivery rate tracking for logging
+    //
+    uint64_t RecentSendRate;    // Most recent send rate in bps
+    uint64_t RecentAckRate;     // Most recent ack rate in bps
+    uint64_t RecentDeliveryRate; // Most recent delivery rate in bps
+
+    //
+    // Periodic logging fields
+    //
+    uint64_t LastPeriodicLogTime;   // Last time periodic log was generated (microseconds)
+    uint64_t LastLoggedSendBytes;   // Send bytes at last log
+    uint64_t LastLoggedRecvBytes;   // Receive bytes at last log
+    uint64_t LastLoggedSentPackets; // Sent packets at last log
+    uint64_t LastLoggedLostPackets; // Lost packets at last log
+
+    //
+    // Send and Ack delay tracking for delivery rate calculation
+    //
+    uint64_t RecentSendDelay;       // Send delay used in recent delivery rate calculation (microseconds)
+    uint64_t RecentAckDelay;        // Ack delay used in recent delivery rate calculation (microseconds)
+
 } QUIC_CONGESTION_CONTROL_BBR;
 
 _IRQL_requires_max_(DISPATCH_LEVEL)
@@ -220,4 +242,10 @@ void
 BbrCongestionControlInitialize(
     _In_ QUIC_CONGESTION_CONTROL* Cc,
     _In_ const QUIC_SETTINGS_INTERNAL* Settings
+    );
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+void
+BbrCongestionControlPeriodicLog(
+    _In_ QUIC_CONGESTION_CONTROL* Cc
     );

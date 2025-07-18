@@ -383,3 +383,18 @@ _site
 
 # packaging artifacts
 APKBUILD
+
+# Ignore embedded git repositories
+FlameGraph/
+msquic/
+
+# Ignore large directories
+msquic_lttng*/
+auto_perf_*/
+
+# Build artifacts
+build/
+artifacts/
+
+# Other large files
+*.log
