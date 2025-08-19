@@ -118,12 +118,15 @@ def analyze_log(log_file, max_lines=None, time_window=0.1, aggregate=False):
                 send_delay_us = int(send_delay_match.group(1)) if send_delay_match else 0
                 ack_delay_us = int(ack_delay_match.group(1)) if ack_delay_match else 0
                 
+<<<<<<< HEAD
                 # 提取PacingGain和CwndGain
                 pacing_gain_match = re.search(r'PacingGain=([\d\.]+)x', line)
                 cwnd_gain_match = re.search(r'CwndGain=([\d\.]+)x', line)
                 pacing_gain = float(pacing_gain_match.group(1)) if pacing_gain_match else 0
                 cwnd_gain = float(cwnd_gain_match.group(1)) if cwnd_gain_match else 0
                 
+=======
+>>>>>>> 4442ae5884e7ef61884edd67d235299ae2e3d327
                 if is_bbr_pkt_sent:
                     # 处理所有SENT事件，不再仅限于ACK后的第一个
                     # 创建数据点
@@ -143,8 +146,13 @@ def analyze_log(log_file, max_lines=None, time_window=0.1, aggregate=False):
                         'lost_packets': total_lost,
                         'loss_rate': loss_rate,  # 保存丢包率
                         'bbr_state': bbr_state,
+<<<<<<< HEAD
                         'pacing_gain': pacing_gain,  # 使用从日志中提取的增益因子
                         'cwnd_gain': cwnd_gain,
+=======
+                        'pacing_gain': 0,  # 新日志中没有这些字段，设为0
+                        'cwnd_gain': 0,
+>>>>>>> 4442ae5884e7ef61884edd67d235299ae2e3d327
                         'send_delay_ms': send_delay_us / 1000.0,  # 转换为毫秒
                         'ack_delay_ms': ack_delay_us / 1000.0,     # 转换为毫秒
                         'raw_log': line.strip(),  # 保存原始日志行
@@ -171,8 +179,11 @@ def analyze_log(log_file, max_lines=None, time_window=0.1, aggregate=False):
                         'total_sent': total_sent,
                         'loss_rate': loss_rate,
                         'persistent_congestion': persistent_congestion,
+<<<<<<< HEAD
                         'pacing_gain': pacing_gain,           # 添加pacing_gain
                         'cwnd_gain': cwnd_gain,               # 添加cwnd_gain
+=======
+>>>>>>> 4442ae5884e7ef61884edd67d235299ae2e3d327
                         'raw_log': line.strip()  # 保存原始日志行
                     })
                 
@@ -209,10 +220,17 @@ def analyze_log(log_file, max_lines=None, time_window=0.1, aggregate=False):
         f.write(f"Total sampling points: {len(bbr_df)}\n")
         f.write(f"Data sampling method: All SENT events\n\n")
         
+<<<<<<< HEAD
         f.write("No.,Time(s),PacketNo,Size(B),EstBW(Mbps),PacingRate(Mbps),DeliveryRate(Mbps),RTT(ms),MinRTT(ms),CWND(KB),BytesInFlight(KB),LostPackets,LossRate(%),BBRState,SendDelay(ms),AckDelay(ms),PacingGain,CwndGain\n")
         
         for i, row in bbr_df.iterrows():
             f.write(f"{i+1},{row['time_sec']:.3f},{row['packet_number']},{row['packet_size']:.0f},{row['btlbw_mbps']:.2f},{row['pacing_rate_mbps']:.2f},{row['delivery_rate_mbps']:.2f},{row['rtt_ms']:.2f},{row['rtprop_ms']:.2f},{row['cwnd_kb']:.2f},{row['bytes_in_flight_kb']:.2f},{row['lost_packets']},{row['loss_rate']:.2f},{row['bbr_state']},{row['send_delay_ms']:.2f},{row['ack_delay_ms']:.2f},{row['pacing_gain']:.2f},{row['cwnd_gain']:.2f}\n")
+=======
+        f.write("No.,Time(s),PacketNo,Size(B),EstBW(Mbps),PacingRate(Mbps),DeliveryRate(Mbps),RTT(ms),MinRTT(ms),CWND(KB),BytesInFlight(KB),LostPackets,LossRate(%),BBRState,SendDelay(ms),AckDelay(ms)\n")
+        
+        for i, row in bbr_df.iterrows():
+            f.write(f"{i+1},{row['time_sec']:.3f},{row['packet_number']},{row['packet_size']:.0f},{row['btlbw_mbps']:.2f},{row['pacing_rate_mbps']:.2f},{row['delivery_rate_mbps']:.2f},{row['rtt_ms']:.2f},{row['rtprop_ms']:.2f},{row['cwnd_kb']:.2f},{row['bytes_in_flight_kb']:.2f},{row['lost_packets']},{row['loss_rate']:.2f},{row['bbr_state']},{row['send_delay_ms']:.2f},{row['ack_delay_ms']:.2f}\n")
+>>>>>>> 4442ae5884e7ef61884edd67d235299ae2e3d327
         
         f.write("\n=== Raw Log Lines ===\n")
         for i, row in bbr_df.iterrows():

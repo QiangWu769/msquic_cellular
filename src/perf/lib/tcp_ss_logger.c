@@ -835,7 +835,11 @@ TcpSsLoggerInitialize(
     memset(Logger->Entries, 0, Logger->MaxEntries * sizeof(TCP_SS_LOG_ENTRY));
     
     // 默认日志文件路径
+<<<<<<< HEAD
     TcpSsLoggerSetLogFile(Logger, "/home/wuq/msquic_cellular/bbr_logs/tcp_bbr.txt");
+=======
+    TcpSsLoggerSetLogFile(Logger, "/root/msquic/bbr_logs/tcp_bbr.txt");
+>>>>>>> 4442ae5884e7ef61884edd67d235299ae2e3d327
     
     Logger->Initialized = TRUE;
     return QUIC_STATUS_SUCCESS;
