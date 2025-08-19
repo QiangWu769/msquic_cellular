@@ -476,7 +476,7 @@ BbrCongestionControlOnDataSent(
     }
 
     // Log BBR state for each packet transmission
-    // BbrCongestionControlLogPacketSent(Cc, NumRetransmittableBytes);
+     BbrCongestionControlLogPacketSent(Cc, NumRetransmittableBytes);
 
 #ifdef QUIC_ENHANCED_PACKET_LOGGING
     // Enhanced packet level logging
@@ -519,13 +519,13 @@ BbrCongestionControlLogPacketSent(
     uint64_t ConnectionDuration = CurrentTime - Connection->Stats.Timing.Start;
     
     // Write detailed BBR packet log to the same log file as periodic logs
-    FILE* logFile = fopen("/root/msquic/bbr_logs/bbr_log.txt", "a");
+    FILE* logFile = fopen("/home/wuq/msquic_cellular/bbr_logs/bbr_log.txt", "a");
     if (logFile != NULL) {
         fprintf(logFile, "[BBR-PKT-SENT] T=%lu.%03lu s, PKT=%lu, Size=%u B, "
                "EstBW=%.2f Mbps, PacingRate=%.2f Mbps, DeliveryRate=%.2f Mbps, "
                "RTT=%lu us, MinRTT=%lu us, CWND=%u B, InFlight=%u B, "
                "Loss=%.2f%%, State=%s, TotalSent=%lu, TotalLost=%lu, "
-               "SendDelay=%lu us, AckDelay=%lu us\n",
+               "SendDelay=%lu us, AckDelay=%lu us, PacingGain=%.2fx, CwndGain=%.2fx\n",
                (unsigned long)(ConnectionDuration / 1000000),
                (unsigned long)((ConnectionDuration % 1000000) / 1000),
                (unsigned long)TotalPacketsSent,
@@ -545,7 +545,9 @@ BbrCongestionControlLogPacketSent(
                (unsigned long)TotalPacketsSent,
                (unsigned long)TotalPacketsLost,
                (unsigned long)Bbr->RecentSendDelay,
-               (unsigned long)Bbr->RecentAckDelay);
+               (unsigned long)Bbr->RecentAckDelay,
+               (double)Bbr->PacingGain / (double)GAIN_UNIT,  // Added PacingGain
+               (double)Bbr->CwndGain / (double)GAIN_UNIT);   // Added CwndGain
         fclose(logFile);
     }
 }
@@ -1050,7 +1052,6 @@ BbrCongestionControlOnDataAcknowledged(
         Cc, AckEvent->NumTotalAckedRetransmittableBytes, AckEvent->NumRetransmittableBytes);
 
     // Log each acknowledged packet (disabled for periodic logging)
-    /*
     if (AckEvent->AckedPackets != NULL) {
         const QUIC_PATH* Path = &Connection->Paths[0];
         QUIC_SENT_PACKET_METADATA* AckedPacket = AckEvent->AckedPackets;
@@ -1071,34 +1072,39 @@ BbrCongestionControlOnDataAcknowledged(
             uint64_t TotalLost = Connection->Stats.Send.SuspectedLostPackets;
             double LossRate = TotalSent > 0 ? ((double)TotalLost * 100.0) / (double)TotalSent : 0.0;
             
-            // Print per-packet ACK log
-            printf("[BBR-PKT-ACKED] T=%lu.%03lu s, PKT=%lu, Size=%u B, "
-                   "EstBW=%.2f Mbps, PacingRate=%.2f Mbps, DeliveryRate=%.2f Mbps, "
-                   "RTT=%lu us, MinRTT=%lu us, CWND=%u B, InFlight=%u B, "
-                   "Loss=%.2f%%, State=%s, TotalSent=%lu, TotalLost=%lu\n",
-                   (unsigned long)(ConnectionDuration / 1000000),
-                   (unsigned long)((ConnectionDuration % 1000000) / 1000),
-                   (unsigned long)AckedPacket->PacketNumber,
-                   AckedPacket->PacketLength,
-                   EstimatedBandwidth / 1000000.0,
-                   PacingRate / 1000000.0,
-                   DeliveryRate / 1000000.0,
-                   (unsigned long)SmoothedRtt,
-                   (unsigned long)MinRtt,
-                   CongestionWindow,
-                   Bbr->BytesInFlight,
-                   LossRate,
-                   Bbr->BbrState == 0 ? "STARTUP" :
-                   Bbr->BbrState == 1 ? "DRAIN" :
-                   Bbr->BbrState == 2 ? "PROBE_BW" :
-                   Bbr->BbrState == 3 ? "PROBE_RTT" : "UNKNOWN",
-                   (unsigned long)TotalSent,
-                   (unsigned long)TotalLost);
+            // Write detailed BBR ACK log to file
+            FILE* logFile = fopen("/home/wuq/msquic_cellular/bbr_logs/bbr_log.txt", "a");
+            if (logFile != NULL) {
+                fprintf(logFile, "[BBR-PKT-ACKED] T=%lu.%03lu s, PKT=%lu, Size=%u B, "
+                       "EstBW=%.2f Mbps, PacingRate=%.2f Mbps, DeliveryRate=%.2f Mbps, "
+                       "RTT=%lu us, MinRTT=%lu us, CWND=%u B, InFlight=%u B, "
+                       "Loss=%.2f%%, State=%s, TotalSent=%lu, TotalLost=%lu, PacingGain=%.2fx, CwndGain=%.2fx\n",
+                       (unsigned long)(ConnectionDuration / 1000000),
+                       (unsigned long)((ConnectionDuration % 1000000) / 1000),
+                       (unsigned long)AckedPacket->PacketNumber,
+                       AckedPacket->PacketLength,
+                       EstimatedBandwidth / 1000000.0,
+                       PacingRate / 1000000.0,
+                       DeliveryRate / 1000000.0,
+                       (unsigned long)SmoothedRtt,
+                       (unsigned long)MinRtt,
+                       CongestionWindow,
+                       Bbr->BytesInFlight,
+                       LossRate,
+                       Bbr->BbrState == 0 ? "STARTUP" :
+                       Bbr->BbrState == 1 ? "DRAIN" :
+                       Bbr->BbrState == 2 ? "PROBE_BW" :
+                       Bbr->BbrState == 3 ? "PROBE_RTT" : "UNKNOWN",
+                       (unsigned long)TotalSent,
+                       (unsigned long)TotalLost,
+                       (double)Bbr->PacingGain / (double)GAIN_UNIT,  // Added PacingGain
+                       (double)Bbr->CwndGain / (double)GAIN_UNIT);   // Added CwndGain
+                fclose(logFile);
+            }
             
             AckedPacket = AckedPacket->Next;
         }
     }
-    */
 
 #ifdef QUIC_ENHANCED_PACKET_LOGGING
     // Enhanced packet level logging for acknowledged packets
@@ -1154,7 +1160,6 @@ BbrCongestionControlOnDataLost(
     Bbr->BytesInFlight -= LossEvent->NumRetransmittableBytes;
 
     // Log packet loss event (disabled for periodic logging)
-    /*
     {
         const QUIC_PATH* Path = &Connection->Paths[0];
         uint64_t EstimatedBandwidth = BbrCongestionControlGetBandwidth(Cc);
@@ -1173,32 +1178,38 @@ BbrCongestionControlOnDataLost(
         uint64_t TotalLost = Connection->Stats.Send.SuspectedLostPackets;
         double LossRate = TotalSent > 0 ? ((double)TotalLost * 100.0) / (double)TotalSent : 0.0;
         
-        // Print packet loss log
-        printf("[BBR-PKT-LOST] T=%lu.%03lu s, PKT=%lu, Size=%u B, "
-               "EstBW=%.2f Mbps, PacingRate=%.2f Mbps, DeliveryRate=%.2f Mbps, "
-               "RTT=%lu us, MinRTT=%lu us, CWND=%u B, InFlight=%u B, "
-               "Loss=%.2f%%, State=%s, TotalSent=%lu, TotalLost=%lu, PersistentCongestion=%s\n",
-               (unsigned long)(ConnectionDuration / 1000000),
-               (unsigned long)((ConnectionDuration % 1000000) / 1000),
-               (unsigned long)LossEvent->LargestPacketNumberLost,
-               LossEvent->NumRetransmittableBytes,
-               EstimatedBandwidth / 1000000.0,
-               PacingRate / 1000000.0,
-               DeliveryRate / 1000000.0,
-               (unsigned long)SmoothedRtt,
-               (unsigned long)MinRtt,
-               CongestionWindow,
-               Bbr->BytesInFlight,
-               LossRate,
-               Bbr->BbrState == 0 ? "STARTUP" :
-               Bbr->BbrState == 1 ? "DRAIN" :
-               Bbr->BbrState == 2 ? "PROBE_BW" :
-               Bbr->BbrState == 3 ? "PROBE_RTT" : "UNKNOWN",
-               (unsigned long)TotalSent,
-               (unsigned long)TotalLost,
-               LossEvent->PersistentCongestion ? "YES" : "NO");
+        // Write detailed BBR loss log to file
+        FILE* logFile = fopen("/home/wuq/msquic_cellular/bbr_logs/bbr_log.txt", "a");
+        if (logFile != NULL) {
+            fprintf(logFile, "[BBR-PKT-LOST] T=%lu.%03lu s, PKT=%lu, Size=%u B, "
+                   "EstBW=%.2f Mbps, PacingRate=%.2f Mbps, DeliveryRate=%.2f Mbps, "
+                   "RTT=%lu us, MinRTT=%lu us, CWND=%u B, InFlight=%u B, "
+                   "Loss=%.2f%%, State=%s, TotalSent=%lu, TotalLost=%lu, PersistentCongestion=%s, "
+                   "PacingGain=%.2fx, CwndGain=%.2fx\n",
+                   (unsigned long)(ConnectionDuration / 1000000),
+                   (unsigned long)((ConnectionDuration % 1000000) / 1000),
+                   (unsigned long)LossEvent->LargestPacketNumberLost,
+                   LossEvent->NumRetransmittableBytes,
+                   EstimatedBandwidth / 1000000.0,
+                   PacingRate / 1000000.0,
+                   DeliveryRate / 1000000.0,
+                   (unsigned long)SmoothedRtt,
+                   (unsigned long)MinRtt,
+                   CongestionWindow,
+                   Bbr->BytesInFlight,
+                   LossRate,
+                   Bbr->BbrState == 0 ? "STARTUP" :
+                   Bbr->BbrState == 1 ? "DRAIN" :
+                   Bbr->BbrState == 2 ? "PROBE_BW" :
+                   Bbr->BbrState == 3 ? "PROBE_RTT" : "UNKNOWN",
+                   (unsigned long)TotalSent,
+                   (unsigned long)TotalLost,
+                   LossEvent->PersistentCongestion ? "YES" : "NO",
+                   (double)Bbr->PacingGain / (double)GAIN_UNIT,  // Added PacingGain
+                   (double)Bbr->CwndGain / (double)GAIN_UNIT);   // Added CwndGain
+            fclose(logFile);
+        }
     }
-    */
 
 #ifdef QUIC_ENHANCED_PACKET_LOGGING
     // Enhanced packet level logging for lost packets
@@ -1624,7 +1635,7 @@ BbrCongestionControlPeriodicLog(
     uint64_t ConnectionDuration = CurrentTime - Connection->Stats.Timing.Start;
     
     // Print periodic log to file
-    FILE* logFile = fopen("/root/msquic/bbr_logs/bbr_log.txt", "a");
+    FILE* logFile = fopen("/home/wuq/msquic_cellular/bbr_logs/bbr_log_10ms.txt", "a");
     if (logFile != NULL) {
         fprintf(logFile, "[BBR-LOG] T=%lu.%03lu s, Send=%.2f Mbps, Recv=%.2f Mbps, Total=%.2f Mbps, "
                 "EstBW=%.2f Mbps, PacingRate=%.2f Mbps, PacingGain=%.2fx, CwndGain=%.2fx, DeliveryRate=%.2f Mbps, "

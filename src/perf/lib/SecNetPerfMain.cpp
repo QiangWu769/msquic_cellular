@@ -14,12 +14,17 @@ Abstract:
 #include "PerfClient.h"
 #include "Tcp.h"
 
+// 使用新的TCP日志器接口替换旧的
+#include "tcp_logger.h"
+
 const MsQuicApi* MsQuic;
 CXPLAT_WORKER_POOL* WorkerPool;
 CXPLAT_DATAPATH* Datapath;
 CxPlatWatchdog* Watchdog;
 PerfServer* Server;
 PerfClient* Client;
+BOOLEAN UseTcp = FALSE;
+BOOLEAN EnableTcpLogging = FALSE;
 
 uint32_t MaxRuntime = 0;
 QUIC_EXECUTION_PROFILE PerfDefaultExecutionProfile = QUIC_EXECUTION_PROFILE_LOW_LATENCY;
@@ -103,6 +108,7 @@ PrintHelp(
         "\n"
         "  Config options:\n"
         "  -tcp:<0/1>               Disables/enables TCP usage (instead of QUIC). (def:0)\n"
+        "  -tcplog:<0/1>            Disables/enables TCP packet level logging via eBPF. (def:0)\n"
         "  -encrypt:<0/1>           Disables/enables encryption. (def:1)\n"
         "  -pacing:<0/1>            Disables/enables send pacing. (def:1)\n"
         "  -sendbuf:<0/1>           Disables/enables send buffering. (def:0)\n"
@@ -169,6 +175,8 @@ QuicMainStart(
     const char* Target = TryGetTarget(argc, argv);
 
     TryGetValue(argc, argv, "maxruntime", &MaxRuntime);
+    TryGetValue(argc, argv, "tcp", &UseTcp);
+    TryGetValue(argc, argv, "tcplog", &EnableTcpLogging);
 
     QUIC_STATUS Status = QUIC_STATUS_OUT_OF_MEMORY;
     MsQuic = new(std::nothrow) MsQuicApi;
@@ -291,6 +299,81 @@ QuicMainStart(
     TryGetValue(argc, argv, "ecn", &PerfDefaultEcnEnabled);
     TryGetValue(argc, argv, "qeo", &PerfDefaultQeoAllowed);
 
+    // 初始化TCP日志器（使用新的接口）
+    if (UseTcp && EnableTcpLogging) {
+        WriteOutput("Initializing TCP packet level logging via ss command\n");
+        
+        TCP_LOGGER* Logger = TcpLoggerGetDefault();
+        uint16_t TargetPort = (uint16_t)PERF_DEFAULT_PORT;
+        
+        // 重定向标准错误到标准输出
+        dup2(STDOUT_FILENO, STDERR_FILENO);
+        WriteOutput("Attempting to initialize TCP logger...\n");
+        
+        // 如果指定了特定端口，则使用该端口
+        uint32_t PortValue;
+        if (TryGetValue(argc, argv, "port", &PortValue)) {
+            TargetPort = (uint16_t)PortValue;
+        }
+        
+        // 设置默认日志文件路径 - 确保目录存在
+        int mkdirResult = system("mkdir -p /root/msquic/bbr_logs");
+        if (mkdirResult != 0) {
+            WriteOutput("Warning: Failed to create log directory\n");
+        }
+        
+        // 使用带时间戳的日志文件名
+        time_t now = time(NULL);
+        struct tm *tm_info = localtime(&now);
+        char timestamp[32];
+        strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", tm_info);
+        char logFilePath[256];
+        snprintf(logFilePath, sizeof(logFilePath), "/root/msquic/bbr_logs/tcp_bbr_%s.txt", timestamp);
+        
+        TcpLoggerSetLogFile(Logger, logFilePath);
+        WriteOutput("Log file will be written to: %s\n", logFilePath);
+        
+        if (QUIC_SUCCEEDED(TcpLoggerInitialize(Logger, 100000, TargetPort))) {
+            WriteOutput("TCP logger initialized successfully\n");
+            
+            // Configure logger options
+            BOOLEAN EnableConsoleOutput = FALSE;
+            TryGetValue(argc, argv, "ptput", &EnableConsoleOutput);
+            
+            // 尝试获取采样间隔参数
+            uint32_t SamplingInterval = 100; // 默认采样间隔100ms
+            TryGetValue(argc, argv, "tcplog_interval", &SamplingInterval);
+            if (SamplingInterval < 10) SamplingInterval = 10; // 至少10ms
+            
+            WriteOutput("Using TCP logging sampling interval: %ums\n", SamplingInterval);
+            
+            // 设置采样间隔和控制台输出
+            TcpLoggerSetOutputOptions(Logger, EnableConsoleOutput, SamplingInterval);
+            
+            // 在启动前手动测试ss命令，检查是否可以执行
+            WriteOutput("Testing ss command availability...\n");
+            FILE* testPipe = popen("ss -h 2>&1", "r");
+            if (testPipe) {
+                char testBuf[128];
+                if (fgets(testBuf, sizeof(testBuf), testPipe) != NULL) {
+                    WriteOutput("ss command test output: %s", testBuf);
+                }
+                pclose(testPipe);
+            } else {
+                WriteOutput("Warning: Unable to test ss command\n");
+            }
+            
+            // Start the logger
+            if (QUIC_SUCCEEDED(TcpLoggerStart(Logger))) {
+                WriteOutput("TCP logging started\n");
+            } else {
+                WriteOutput("Failed to start TCP logger\n");
+            }
+        } else {
+            WriteOutput("Failed to initialize TCP logger\n");
+        }
+    }
+
     uint32_t WatchdogTimeout = 0;
     if (TryGetValue(argc, argv, "watchdog", &WatchdogTimeout) && WatchdogTimeout != 0) {
         Watchdog = new(std::nothrow) CxPlatWatchdog(WatchdogTimeout, "perf_watchdog", true);
@@ -347,6 +430,20 @@ QuicMainFree(
     Client = nullptr;
     delete Server;
     Server = nullptr;
+    
+    // Clean up TCP logger if TCP mode with logging was enabled
+    if (UseTcp && EnableTcpLogging) {
+        TCP_LOGGER* Logger = TcpLoggerGetDefault();
+        
+        WriteOutput("TCP Packet Logging Summary:\n");
+        TcpLoggerPrintAll(Logger);
+        
+        // Stop and clean up the logger
+        TcpLoggerStop(Logger);
+        TcpLoggerCleanup(Logger);
+        WriteOutput("TCP logging stopped and cleaned up\n");
+    }
+    
     delete MsQuic;
     MsQuic = nullptr;
 
